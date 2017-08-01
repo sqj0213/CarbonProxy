@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"regexp"
 	"github.com/klauspost/crc32"
-	//logging "github.com/neko-neko/SocketServer-Example/shared/log"
-	logging "log"
+	//"github.com/Sirupsen/logrus"
+	"github.com/neko-neko/SocketServer-Example/shared/log"
 	"github.com/neko-neko/SocketServer-Example/server"
 	"github.com/c4pt0r/ini"
 	"gopkg.in/fatih/pool.v2"
@@ -28,7 +28,7 @@ type connObj struct{
 }
 
 var reHashStatus=false
-const MaxPacketQueueSize = 1024
+const MaxPacketQueueSize = 1024*1024*10
 var conf = ini.NewConf("/etc/CarbonProxy.ini")
 var serverObj = server.Server{}
 var netBufferQueue chan server.PacketQueue
@@ -65,9 +65,9 @@ type Service struct {
 	daemon.Daemon
 }
 // Manage by daemon commands or run the daemon
-func (service *Service) Manage( log logging.Logger) (string, error) {
-	conf.Parse()
-	initNodeMap(*nodeListStr,log)
+func (service *Service) Manage( ) (string, error) {
+
+	initNodeMap(*nodeListStr)
  	hashNodeMapLen = len(nodeListMap)
 	usage := "Usage:default[/etc/CarbonProxy.ini] myservice install | remove | start | stop | status | checkconfig | help "
 	// if received any kind of command, do it
@@ -101,14 +101,14 @@ func (service *Service) Manage( log logging.Logger) (string, error) {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, os.Kill, syscall.SIGTERM)
 
-	go reConnect(log)
+	go reConnect()
 	//fmt.Print("\"asdfasdf\"")
 	// prepare server
 	netBufferQueue = make(chan server.PacketQueue, MaxPacketQueueSize)
 
 	serverObj, err := server.NewServer(*hostIP, *listenPort, netBufferQueue)
 	if err != nil {
-		log.Println("host:",*hostIP,":",*listenPort," create server failed! err(",err,")")
+		log.Info("host:",*hostIP,":",*listenPort," create server failed! err(",err,")")
 		return usage, nil
 	}
 
@@ -116,41 +116,42 @@ func (service *Service) Manage( log logging.Logger) (string, error) {
 	rerr := serverObj.Run()
 
 	if rerr != nil {
-		log.Println("host:",*hostIP,":",strconv.Itoa(*listenPort)," start server failed! err(",rerr,")")
+		log.Info("host:",*hostIP,":",strconv.Itoa(*listenPort)," start server failed! err(",rerr,")")
 		return usage, nil
 	}
 
 	// 启动多个处理线程
 	i := 0 
 	for i < *threadCount - 1{
-		go readChannelAndSend(log)
+		go readChannelAndSend()
 		i = i + 1
 	}
 
 	var leaderBufferQueue = make(chan server.PacketQueue)
 	leaderServer, err := server.NewServer(*hostIP, *leaderPort, leaderBufferQueue)
 	if err != nil {
-		log.Println("host:",*hostIP,":",strconv.Itoa(*leaderPort)," create leader server failed! err(",err,")")
+		log.Info("host:",*hostIP,":",strconv.Itoa(*leaderPort)," create leader server failed! err(",err,")")
 		return usage, err
 	}else{
-		log.Println("host:",*hostIP,":",strconv.Itoa(*leaderPort)," create leader server success! err(",err,")")
+		log.Info("host:",*hostIP,":",strconv.Itoa(*leaderPort)," create leader server success! err(",err,")")
 	}
 	rerr = leaderServer.Run()
 
 	if rerr != nil {
-		log.Println("host:",*hostIP,":",strconv.Itoa(*leaderPort)," start leader server failed! err(",rerr,")")
+		log.Info("host:",*hostIP,":",strconv.Itoa(*leaderPort)," start leader server failed! err(",rerr,")")
 		return usage, rerr
 	}else{
-		log.Println("host:",*hostIP,":",strconv.Itoa(*leaderPort)," start leader server success! err(",rerr,")")
+		log.Info("host:",*hostIP,":",strconv.Itoa(*leaderPort)," start leader server success! err(",rerr,")")
 	}
 
-	timer := time.Tick(100 * time.Millisecond)
-	for _ = range timer {
+	//timer := time.Tick(10 * time.Millisecond)
+	//for _ = range timer {
+	for {
 		select {
 		// Receive Packet
 		case p := <-leaderBufferQueue:
 
-			leaderServer.Notify(p.Connection,[]byte(processCMD(string(p.Packet[:]),log)))
+			leaderServer.Notify(p.Connection,[]byte(processCMD(string(p.Packet[:]))))
 
 		}
 	}
@@ -161,9 +162,23 @@ func (service *Service) Manage( log logging.Logger) (string, error) {
 
 
 func main() {
+
+var rlim syscall.Rlimit
+	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim)
+	if err != nil {
+		fmt.Println("get rlimit error: " + err.Error())
+		os.Exit(1)
+	}
+	rlim.Cur = 50000
+	rlim.Max = 50000
+	err = syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rlim)
+	if err != nil {
+		fmt.Println("set rlimit error: " + err.Error())
+		os.Exit(1)
+	}
 	conf.Parse()
 	//fmt.Print(*hostIP,":",*listenPort,":",*indexFile,":",*nodeListStr)
-	runtime.GOMAXPROCS(1)
+	runtime.GOMAXPROCS(*threadCount)
 
 	if ( *nodeListStr == "readfailed" ){
 		fmt.Print("read config file failed!(/etc/CarbonProxy.ini)\n")
@@ -176,42 +191,45 @@ func main() {
         os.Exit(-1)
     }
 	defer logFile.Close()
-	var log = logging.New(logFile,"", logging.Ldate | logging.Ltime | logging.Lshortfile)
+	log.SetOut(logFile)
+	//log.logger.Level=logrus.InfoLevel
+	//log.SetLevel()
 
 	//启动节点健康检查 
 	srv, err := daemon.New(name, description, dependencies...)
 	if err != nil {
-		log.Println("Error: ", err)
+		log.Info("Error: ", err)
 		os.Exit(1)
 	}
-	log.Println("asdfdasf")
+	log.Info("asdfdasf")
 	service := &Service{srv}
-	status, err := service.Manage(*log)
+	status, err := service.Manage()
 	if err != nil {
-		log.Println(status, "\nError: ", err)
+		log.Info(status, "\nError: ", err)
 		os.Exit(1)
 	}
-	log.Println(status)
+	log.Info(status)
 }
 func checkConfig()(string,error){
 
 	return "config file is unknow and not complete!",nil
 }
 
-func readChannelAndSend(log logging.Logger){
-	timer := time.Tick(100 * time.Millisecond)
+func readChannelAndSend(){
+	timer := time.Tick(1 * time.Millisecond)
 	for _ = range timer {
 		select {
 		// Receive Packet
 		case p := <-netBufferQueue:
 
-			hashSend(string(p.Packet[:]),log)
+			hashSend(string(p.Packet))
+			log.Info("recivedmsg:",string(p.Packet))
 
 		}
 	}
 
 }
-func initNodeMap( nodeListStr string,log logging.Logger ){
+func initNodeMap( nodeListStr string ){
 	nodeList := strings.Split(nodeListStr,",")
 	for index,value := range nodeList{
 
@@ -225,16 +243,16 @@ func initNodeMap( nodeListStr string,log logging.Logger ){
 		//nodeListMap[index].connPoolObj,nodeListMap[index].connErr := pool.NewChannelPool(5, 30, factory)
 		//if tmpMap1["status"] != nil {
 		if connObjV.connErr!= nil {
-			log.Println("host:",connObjV.hostPort," connect failed! error(",connObjV.connErr,")" )
-			//log.Println("host:",tmpMap1["host"]," port:",tmpMap1["port"]," connect failed! error(",tmpMap1["status"].error() )
+			log.Info("host:",connObjV.hostPort," connect failed! error(",connObjV.connErr,")" )
+			//log.Info("host:",tmpMap1["host"]," port:",tmpMap1["port"]," connect failed! error(",tmpMap1["status"].error() )
 		}else{
-			log.Println("host:",connObjV.hostPort," connect success! msg(",connObjV.connErr,")" )
+			log.Info("host:",connObjV.hostPort," connect success! msg(",connObjV.connErr,")" )
 		}
 		nodeListMap[index]=connObjV
 		//nodeListMap[index] = tmpMap1
 	}
 }
-func reConnect( log logging.Logger ){
+func reConnect(  ){
 	for {
 		for index,value := range nodeListMap{
 			if nodeListMap[index].connPoolObj == nil {
@@ -244,53 +262,54 @@ func reConnect( log logging.Logger ){
 				connObjV.connPoolObj,connObjV.connErr = pool.NewChannelPool(5, 30, factory)
 
 				if connObjV.connErr != nil {
-					log.Println("host:",connObjV.hostPort," reConnect failed! error(",connObjV.connErr,")" )
-					//log.Println("host:",tmpMap1["host"]," port:",tmpMap1["port"]," connect failed! error(",tmpMap1["status"].error() )
+					log.Info("host:",connObjV.hostPort," reConnect failed! error(",connObjV.connErr,")" )
+					//log.Info("host:",tmpMap1["host"]," port:",tmpMap1["port"]," connect failed! error(",tmpMap1["status"].error() )
 				}else{
-					log.Println("host:",connObjV.hostPort," reConnect success! msg(",connObjV.connErr,")" )
+					log.Info("host:",connObjV.hostPort," reConnect success! msg(",connObjV.connErr,")" )
 
 				}
 				nodeListMap[index]=connObjV
 				//nodeListMap[index] = tmpMap1
 			}else{
-				log.Println("host:",nodeListMap[index].hostPort," is alived!")
+				log.Info("host:",nodeListMap[index].hostPort," is alived!")
 			}
 		}
 		time.Sleep(time.Duration(*checkInterval)*time.Second)
 	}
 }
 
-func hashSend( data string,log logging.Logger ){
-	lineDataList := strings.Split( data, "" )
+func hashSend( data string ){
+	lineDataList := strings.Split( data, "\n" )
 
 	for _, line := range lineDataList{
 			urlIndex := regexpStr.FindStringSubmatch(line)
 			//fmt.Print( len(urlIndex)," |||| ",line,"")
+			line=line+"\n"
 			if len(urlIndex) == 2  {
 				checkSum := crc32.Checksum([]byte(urlIndex[1]),crc32q)
 				hashIndex := int(uint32(checkSum)%uint32(hashNodeMapLen))
 				if nodeListMap[hashIndex].connPoolObj == nil{
-					log.Println("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," is invalid and drop data(",line,")!")
+					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," is invalid and drop data(",line,")!")
 					continue
 				}
 				conn,err := nodeListMap[hashIndex].connPoolObj.Get()
 				if err != nil{
-					log.Println("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," get conn error(",err.Error(),") and drop data(",line,")")
+					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," get conn error(",err.Error(),") and drop data(",line,")")
 					continue
 				}
 				len,err := conn.Write([]byte(line))
 				if err != nil {
-					log.Println("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," write error(",err.Error(),")")
+					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," write error(",err.Error(),")")
 				}else{
 
-					log.Println("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," write success(",err,") len=",len," line=\"",line,"\"")
+					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," write success(",err,") len=",len," line=\"",line,"\"")
 				}
 				
 			}else{
-				log.Println("subThread[hashSend] data format wrong!line=",line,"")
+				log.Info("subThread[hashSend] data format wrong!line=",line,"")
 			}
 			if regErr != nil {
-				log.Println(regErr)
+				log.Info(regErr)
 				regErr = nil
 			}
 	}
@@ -298,26 +317,25 @@ func hashSend( data string,log logging.Logger ){
 }
 
 
-func help(log logging.Logger)(string){
-	log.Println("\n-------------Carbon Proxy help----------------")
-	log.Println("\t\tCarbon Proxy support cmd:(",*cmdList,")\n")
+func help()(string){
+	log.Info("\n-------------Carbon Proxy help----------------")
+	log.Info("\t\tCarbon Proxy support cmd:(",*cmdList,")\n")
 	return "\t\tCarbon Proxy support cmd:("+*cmdList+")\n"
 }
-func checkCMD( cmd string,log logging.Logger )(string){
+func checkCMD( cmd string )(string){
 	if !strings.Contains(","+*cmdList+",", ","+cmd+"," ){
-		return help(log)
+		return help()
 	}
 	return  ""
 }
-func processCMD( _CMD string,log logging.Logger )(string){
-	conf.Parse()
+func processCMD( _CMD string )(string){
 	CMD := strings.Replace(_CMD,"\r\n","",-1)
 	CMD = strings.Replace(CMD,"\r","",-1)
 	CMD = strings.Replace(CMD,"\n","",-1)	
 
-	checkResult := checkCMD(CMD,log)
+	checkResult := checkCMD(CMD)
 	if checkResult == "" {
-		log.Println("processCMD[subThread]:",CMD)
+		log.Info("processCMD[subThread]:",CMD)
 		switch CMD{
 			case "getHashFile":
 				return CMD_getHashFileContent()
@@ -327,33 +345,33 @@ func processCMD( _CMD string,log logging.Logger )(string){
 				reHashStatus = true
 				return "set rehash status is true!"
 			case "help":
-				return help(log)
+				return help()
 			case "getNodeStatus":
-				return CMD_getNodeStatus(log)
+				return CMD_getNodeStatus()
 			default:
-				log.Println(CMD)
+				log.Info(CMD)
 				return CMD
 		}
 	}else{
 		return checkResult
 	}
 }
-func CMD_getNodeStatus(log logging.Logger)(string){
+func CMD_getNodeStatus()(string){
 	retStr := ""
 	nodeList := strings.Split(*nodeListStr,",")
 	for _,hostPort := range nodeList{
 		host := strings.Split( hostPort,":")[0]
 		port := *nodemangePort
-		retStr = retStr+getNodeStatus(host,port,"getNodeStatus",log)+""
+		retStr = retStr+getNodeStatus(host,port,"getNodeStatus")+""
 	}
 	return retStr
 }
 
-func getNodeStatus(host string,port int, cmd string,log logging.Logger)(string){
+func getNodeStatus(host string,port int, cmd string)(string){
 
 	conn, err := net.Dial("tcp", fmt.Sprintf("%s:%d", host, port))
 	if err != nil {
-		log.Println("connect node(",fmt.Sprintf("%s:%d", host, port),")failed!err(",err,")")
+		log.Info("connect node(",fmt.Sprintf("%s:%d", host, port),")failed!err(",err,")")
 		return fmt.Sprintf("%s:%d", host, port)+" cmd:"+cmd+" msg:"+err.Error()
 	}
 	defer conn.Close()
