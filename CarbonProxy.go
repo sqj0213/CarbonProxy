@@ -323,7 +323,7 @@ func hashSend( data string ){
 				conn,err := nodeListMap[hashIndex].connPoolObj.Get()
 				if err != nil{
 					nodeListMap[hashIndex].writeErrorCount = nodeListMap[hashIndex].writeErrorCount + 1
-					//nodeListMap[hashIndex].writeCount = nodeListMap[hashIndex].writeCount + 1
+					nodeListMap[hashIndex].writeCount = nodeListMap[hashIndex].writeCount + 1
 					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," get conn error(",err.Error(),") and drop data(",line,")")
 					continue
 				}
@@ -336,8 +336,8 @@ func hashSend( data string ){
 					mainStatus.sendCount = mainStatus.sendCount + 1
 					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," write success(",err,") len=",len," line=\"",line,"\"")
 				}
-				fmt.Print(nodeListMap[hashIndex].writeCount )
-				//nodeListMap[hashIndex].writeCount = nodeListMap[hashIndex].writeCount + 1
+				//fmt.Print(nodeListMap[hashIndex].writeCount )
+				nodeListMap[hashIndex].writeCount = nodeListMap[hashIndex].writeCount + 1
 				
 			}else{
 				mainStatus.invalidDataCount = mainStatus.invalidDataCount + 1
