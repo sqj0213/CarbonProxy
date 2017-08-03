@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"syscall"
 	"regexp"
+	//"encoding/json"
 	"github.com/klauspost/crc32"
 	//"github.com/Sirupsen/logrus"
 	"github.com/neko-neko/SocketServer-Example/shared/log"
@@ -23,9 +24,19 @@ import (
 
 type connObj struct{
 	hostPort string
+	writeCount int
+	writeErrorCount int
+	readCount int
+	readErrorCount int
 	connPoolObj pool.Pool
 	connErr	error
 }
+type daemonStatus struct{
+	invalidDataCount int
+	inCount int
+	sendCount int
+}
+var mainStatus = daemonStatus{}
 
 var reHashStatus=false
 const MaxPacketQueueSize = 1024*1024*10
@@ -50,7 +61,7 @@ var
 )
 
 var crc32q = crc32.MakeTable(0xD5828281)
-var nodeListMap = make( map[int]connObj,0 )
+var nodeListMap = make( map[int]*connObj,0 )
 const (
 
 	// name of the service
@@ -67,8 +78,7 @@ type Service struct {
 // Manage by daemon commands or run the daemon
 func (service *Service) Manage( ) (string, error) {
 
-	initNodeMap(*nodeListStr)
- 	hashNodeMapLen = len(nodeListMap)
+
 	usage := "Usage:default[/etc/CarbonProxy.ini] myservice install | remove | start | stop | status | checkconfig | help "
 	// if received any kind of command, do it
 	if len(os.Args) > 1 {
@@ -101,7 +111,7 @@ func (service *Service) Manage( ) (string, error) {
 	interrupt := make(chan os.Signal, 1)
 	signal.Notify(interrupt, os.Interrupt, os.Kill, syscall.SIGTERM)
 
-	go reConnect()
+	go reConnect(true)
 	//fmt.Print("\"asdfasdf\"")
 	// prepare server
 	netBufferQueue = make(chan server.PacketQueue, MaxPacketQueueSize)
@@ -162,7 +172,9 @@ func (service *Service) Manage( ) (string, error) {
 
 
 func main() {
-
+mainStatus.invalidDataCount=0
+mainStatus.inCount=0
+mainStatus.sendCount=0
 var rlim syscall.Rlimit
 	err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rlim)
 	if err != nil {
@@ -177,6 +189,11 @@ var rlim syscall.Rlimit
 		os.Exit(1)
 	}
 	conf.Parse()
+
+	initNodeMap(*nodeListStr)
+ 	hashNodeMapLen = len(nodeListMap)
+	reConnect(false)
+
 	//fmt.Print(*hostIP,":",*listenPort,":",*indexFile,":",*nodeListStr)
 	runtime.GOMAXPROCS(*threadCount)
 
@@ -235,7 +252,9 @@ func initNodeMap( nodeListStr string ){
 
 		var connObjV = connObj{}
 		connObjV.hostPort=value
-
+		connObjV.writeCount = 0
+		connObjV.readCount = 0
+		connObjV.writeErrorCount = 0
 		var factory = func() (net.Conn, error) { return net.Dial("tcp", connObjV.hostPort) }
 		//fmt.Print(error.error())
 		connObjV.connPoolObj,connObjV.connErr = pool.NewChannelPool(5, 30, factory)
@@ -248,15 +267,19 @@ func initNodeMap( nodeListStr string ){
 		}else{
 			log.Info("host:",connObjV.hostPort," connect success! msg(",connObjV.connErr,")" )
 		}
-		nodeListMap[index]=connObjV
+		nodeListMap[index]=&connObjV
 		//nodeListMap[index] = tmpMap1
 	}
 }
-func reConnect(  ){
+func reConnect( checkFlag bool ){
 	for {
 		for index,value := range nodeListMap{
 			if nodeListMap[index].connPoolObj == nil {
 				connObjV := value
+				connObjV.writeCount = 0
+				connObjV.writeErrorCount = 0
+				connObjV.readCount = 0
+				connObjV.readErrorCount = 0
 				var factory = func() (net.Conn, error) { return net.Dial("tcp",connObjV.hostPort) }
 				//fmt.Print(error.error())
 				connObjV.connPoolObj,connObjV.connErr = pool.NewChannelPool(5, 30, factory)
@@ -274,7 +297,11 @@ func reConnect(  ){
 				log.Info("host:",nodeListMap[index].hostPort," is alived!")
 			}
 		}
-		time.Sleep(time.Duration(*checkInterval)*time.Second)
+		if ( checkFlag ){
+			time.Sleep(time.Duration(*checkInterval)*time.Second)
+		}else{
+			break
+		}
 	}
 }
 
@@ -283,6 +310,7 @@ func hashSend( data string ){
 
 	for _, line := range lineDataList{
 			urlIndex := regexpStr.FindStringSubmatch(line)
+			mainStatus.inCount = mainStatus.inCount + 1
 			//fmt.Print( len(urlIndex)," |||| ",line,"")
 			line=line+"\n"
 			if len(urlIndex) == 2  {
@@ -294,18 +322,25 @@ func hashSend( data string ){
 				}
 				conn,err := nodeListMap[hashIndex].connPoolObj.Get()
 				if err != nil{
+					nodeListMap[hashIndex].writeErrorCount = nodeListMap[hashIndex].writeErrorCount + 1
+					//nodeListMap[hashIndex].writeCount = nodeListMap[hashIndex].writeCount + 1
 					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," get conn error(",err.Error(),") and drop data(",line,")")
 					continue
 				}
+
 				len,err := conn.Write([]byte(line))
 				if err != nil {
+					nodeListMap[hashIndex].writeErrorCount = nodeListMap[hashIndex].writeErrorCount + 1
 					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," write error(",err.Error(),")")
 				}else{
-
+					mainStatus.sendCount = mainStatus.sendCount + 1
 					log.Info("subThread[hashSend] host:",nodeListMap[hashIndex].hostPort," write success(",err,") len=",len," line=\"",line,"\"")
 				}
+				fmt.Print(nodeListMap[hashIndex].writeCount )
+				//nodeListMap[hashIndex].writeCount = nodeListMap[hashIndex].writeCount + 1
 				
 			}else{
+				mainStatus.invalidDataCount = mainStatus.invalidDataCount + 1
 				log.Info("subThread[hashSend] data format wrong!line=",line,"")
 			}
 			if regErr != nil {
@@ -341,6 +376,8 @@ func processCMD( _CMD string )(string){
 				return CMD_getHashFileContent()
 			case "getNodeList":
 				return CMD_getNodeList()
+			case "status":
+				return CMD_getDaemonStatus()
 			case "rehash":
 				reHashStatus = true
 				return "set rehash status is true!"
@@ -356,6 +393,31 @@ func processCMD( _CMD string )(string){
 		return checkResult
 	}
 }
+func CMD_getDaemonStatus()(string){
+	var tmpStr="hostPort:__hostPort__|writeCount:__writeCount__|writeErrorCount:__writeErrorCount__|readCount:__readCount__|readErrorCount:__readErrorCount__\n"
+	var tmplStr="inCount:__inCount__,sendCount:__sendCount__,invalidDataCount:__invalidDataCount__,rehashStatus:__rehashStatus__||__LINELIST__"
+	var retStr=""
+	var lineStr=""
+	retStr = strings.Replace(tmplStr,"__invalidDataCount__",strconv.Itoa(mainStatus.invalidDataCount),-1)
+	retStr = strings.Replace(retStr,"__inCount__",strconv.Itoa(mainStatus.inCount),-1)
+	retStr = strings.Replace(retStr,"__sendCount__",strconv.Itoa(mainStatus.sendCount),-1)
+	if reHashStatus {
+		retStr = strings.Replace(retStr,"__rehashStatus__","true",-1)
+	}else{
+		retStr = strings.Replace(retStr,"__rehashStatus__","false",-1)
+	}
+	for _,value := range nodeListMap{
+		lineStr = lineStr+strings.Replace(tmpStr,"__hostPort__",value.hostPort,-1)
+		lineStr = strings.Replace(lineStr,"__writeCount__",strconv.Itoa(value.writeCount),-1)
+		lineStr = strings.Replace(lineStr,"__writeErrorCount__",strconv.Itoa(value.writeErrorCount),-1)
+		lineStr = strings.Replace(lineStr,"__readCount__",strconv.Itoa(value.readCount),-1)
+		lineStr = strings.Replace(lineStr,"__readErrorCount__",strconv.Itoa(value.readErrorCount),-1)
+	}
+	retStr = strings.Replace(retStr,"__LINELIST__",lineStr,-1)
+	fmt.Print(retStr)
+	return string(retStr)
+}
+
 func CMD_getNodeStatus()(string){
 	retStr := ""
 	nodeList := strings.Split(*nodeListStr,",")
